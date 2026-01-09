@@ -1,0 +1,52 @@
+[package]
+name = "titan-bash"
+version = "0.1.0"
+edition = "2021"
+authors = ["TITAN Team"]
+description = "Modern shell for Windows - no more Git Bash pain"
+license = "MIT"
+repository = "https://github.com/anthropics/titan-bash"
+keywords = ["shell", "bash", "windows", "terminal"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Terminal UI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# REPL
+rustyline = "14"
+
+# Utilities
+dirs = "5"
+which = "7"
+glob = "0.3"
+chrono = "0.4"
+colored = "2"
+unicode-width = "0.1"
+os_pipe = "1.2.3"
+sha2 = "0.10"
+sha1 = "0.10"
+md5 = "0.7"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Windows console API
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
+
+[[bin]]
+name = "titanbash"
+path = "src/main.rs"

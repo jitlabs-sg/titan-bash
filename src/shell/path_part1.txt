@@ -1,0 +1,58 @@
+//\! Path normalization - the core feature of TITAN Bash
+//\!
+//\! Accepts all path formats:
+//\! - C:\Users\xxx     (Windows native)
+//\! - C:/Users/xxx     (Forward slashes)
+//\! - /c/Users/xxx     (Git Bash style)
+//\! - ~/Documents      (Home directory)
+//\! - Mixed: C:/Users\xxx (because why not)
+//\! - \server\share   (UNC network paths)
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+/// Normalize any path format to Windows native path
+///
+/// # Examples
+/// 
+pub fn normalize(path: &str) -> PathBuf {
+    let path = path.trim();
+
+    // Handle empty path
+    if path.is_empty() {
+        return PathBuf::from(".");
+    }
+
+    // Handle ~ (home directory)
+    if path == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    }
+
+    if path.starts_with("~/") || path.starts_with("~\") {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let rest = &path[2..];
+        return home.join(normalize_slashes(rest));
+    }
+
+    // Handle /c/ or /C/ style paths (Git Bash format)
+    // Also handle bare /c (just the drive letter)
+    if path.len() >= 2 {
+        let chars: Vec<char> = path.chars().collect();
+        if chars[0] == '/' && chars[1].is_ascii_alphabetic() {
+            // Check if it is /c (bare drive), /c/ (drive root), or /c/path
+            if chars.len() == 2 || chars[2] == '/' {
+                let drive = chars[1].to_ascii_uppercase();
+                let rest = if chars.len() > 2 { &path[2..] } else { "" };
+                let normalized_rest = normalize_slashes(rest);
+                // For bare /c or /c/, ensure we return C:\ not C:
+                if normalized_rest.is_empty() || normalized_rest == "\" {
+                    return PathBuf::from(format\!("{}:\", drive));
+                }
+                return PathBuf::from(format\!("{}:{}", drive, normalized_rest));
+            }
+        }
+    }
+
+    // Handle regular paths - normalize slashes
+    PathBuf::from(normalize_slashes(path))
+}
