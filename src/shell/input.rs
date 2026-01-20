@@ -15,6 +15,7 @@ use crossterm::{
 };
 
 use super::completer::TitanHelper;
+use super::parser;
 use unicode_width::UnicodeWidthChar;
 
 const PASTE_THRESHOLD: Duration = Duration::from_millis(50);
@@ -356,7 +357,8 @@ impl CrosstermInput {
                                             paste_buffer.push(line);
                                         }
                                         if !paste_buffer.is_empty() {
-                                            let joined = normalize_pasted_lines(std::mem::take(&mut paste_buffer)).join("; ");
+                                            let joined =
+                                                join_pasted_commands(std::mem::take(&mut paste_buffer));
                                             self.buffer.set_text(joined);
                                             self.redraw_line(stdout)?;
                                         }
@@ -458,8 +460,7 @@ impl CrosstermInput {
                                 if !line.is_empty() && paste_buffer.last().map(|s| s.as_str()) != Some(&line) {
                                     paste_buffer.push(line);
                                 }
-                                let joined = normalize_pasted_lines(paste_buffer)
-                                    .join("; ");
+                                let joined = join_pasted_commands(paste_buffer);
                                 self.buffer.set_text(joined);
                                 self.redraw_line(stdout)?;
                                 in_paste_collection = false;
@@ -519,8 +520,7 @@ impl CrosstermInput {
                     let line = self.buffer.text.clone();
                     if !line.is_empty() { paste_buffer.push(line); }
                     if !paste_buffer.is_empty() {
-                        let joined = normalize_pasted_lines(paste_buffer)
-                            .join("; ");
+                        let joined = join_pasted_commands(paste_buffer);
                         self.buffer.set_text(joined);
                         self.redraw_line(stdout)?;
                         in_paste_collection = false;
@@ -679,6 +679,11 @@ pub fn strip_prompt_prefix(line: &str) -> (String, bool) {
         return (s[1..].trim_start().to_string(), true);
     }
 
+    // Bash continuation prompt: "> <cmd>"
+    if s.starts_with('>') && s[1..].chars().next().is_some_and(|c| c.is_whitespace()) {
+        return (s[1..].trim_start().to_string(), true);
+    }
+
     // PowerShell default prompt: "PS C:\Path> <cmd>" or sometimes "PS> <cmd>"
     if s.starts_with("PS") {
         if let Some(pos) = s.find('>') {
@@ -772,6 +777,48 @@ pub fn normalize_pasted_lines(lines: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+fn merge_continued_pasted_commands(lines: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut buffer = String::new();
+
+    for line in lines {
+        if buffer.is_empty() {
+            buffer = line;
+        } else {
+            if parser::ends_with_line_continuation_backslash(&buffer) {
+                let trimmed_len = buffer.trim_end().len();
+                if trimmed_len > 0 {
+                    buffer.truncate(trimmed_len - 1);
+                }
+                buffer.push_str(&line);
+            } else {
+                buffer.push('\n');
+                buffer.push_str(&line);
+            }
+        }
+
+        if parser::is_incomplete(&buffer) {
+            continue;
+        }
+
+        let cmd = buffer.trim();
+        if !cmd.is_empty() {
+            out.push(cmd.to_string());
+        }
+        buffer.clear();
+    }
+
+    if !buffer.trim().is_empty() {
+        out.push(buffer.trim().to_string());
+    }
+
+    out
+}
+
+fn join_pasted_commands(lines: Vec<String>) -> String {
+    merge_continued_pasted_commands(normalize_pasted_lines(lines)).join("; ")
 }
 
 pub fn split_pasted_commands(input: &str) -> Vec<String> {
@@ -875,8 +922,15 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_prompt_prefix_continuation_prompt() {
+        let (cmd, stripped) = strip_prompt_prefix("> echo hi");
+        assert!(stripped);
+        assert_eq!(cmd, "echo hi");
+    }
+
+    #[test]
     fn test_strip_prompt_prefix_does_not_break_redirects() {
-        let (cmd, stripped) = strip_prompt_prefix("echo hi > out.txt");
+        let (cmd, stripped) = strip_prompt_prefix("echo hi > out.txt");   
         assert!(!stripped);
         assert_eq!(cmd, "echo hi > out.txt");
     }
@@ -890,5 +944,16 @@ mod tests {
         ];
         let cmds = normalize_pasted_lines(lines);
         assert_eq!(cmds, vec!["echo one", "echo two"]);
+    }
+
+    #[test]
+    fn test_join_paste_with_continuation_lines() {
+        let lines = vec![
+            "$ echo one \\".to_string(),
+            "> two".to_string(),
+            "$ echo three".to_string(),
+        ];
+        let joined = join_pasted_commands(lines);
+        assert_eq!(joined, "echo one two; echo three");
     }
 }

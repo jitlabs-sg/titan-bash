@@ -31,6 +31,8 @@ pub struct Shell {
     pub last_status: i32,
     /// Should exit
     pub should_exit: bool,
+    /// Exit warning shown (for running jobs confirmation)
+    pub exit_warned: bool,
 }
 
 impl Shell {
@@ -42,6 +44,7 @@ impl Shell {
             vars: HashMap::new(),
             last_status: 0,
             should_exit: false,
+            exit_warned: false,
         })
     }
 

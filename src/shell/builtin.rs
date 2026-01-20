@@ -154,8 +154,18 @@ pub fn try_builtin(shell: &mut Shell, cmd: &str) -> Result<Option<i32>> {
             Ok(Some(code))
         }
         "exit" | "quit" => {
-            shell.should_exit = true;
-            Ok(Some(0))
+            // Check for running background jobs
+            let running_count = shell.tasks.list().iter()
+                .filter(|(_, status, _)| status.starts_with("Running"))
+                .count();
+            if running_count > 0 && !shell.exit_warned {
+                eprintln!("titanbash: {} running job(s). Exit again to force quit.", running_count);
+                shell.exit_warned = true;
+                Ok(Some(1))
+            } else {
+                shell.should_exit = true;
+                Ok(Some(0))
+            }
         }
         "help" => {
             let code = builtin_help()?;
@@ -251,6 +261,14 @@ pub fn try_builtin(shell: &mut Shell, cmd: &str) -> Result<Option<i32>> {
         }
         "kill" => {
             let code = builtin_kill(shell, &rest)?;
+            Ok(Some(code))
+        }
+        "activate" => {
+            let code = builtin_activate(shell, &rest)?;
+            Ok(Some(code))
+        }
+        "deactivate" => {
+            let code = builtin_deactivate(shell)?;
             Ok(Some(code))
         }
         _ => Ok(None),
@@ -609,6 +627,72 @@ fn parse_head_tail_args<'a>(args: &'a [&'a str]) -> (usize, Vec<&'a str>) {
     (count, files)
 }
 
+struct TailArgs<'a> {
+    count: usize,
+    follow: bool,
+    files: Vec<&'a str>,
+}
+
+fn parse_tail_args<'a>(args: &'a [&'a str]) -> TailArgs<'a> {
+    let mut count = 10usize;
+    let mut follow = false;
+    let mut files = Vec::new();
+
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i];
+        if arg == "--" {
+            files.extend_from_slice(&args[i + 1..]);
+            break;
+        }
+
+        if matches!(arg, "-f" | "-F" | "--follow") {
+            follow = true;
+            i += 1;
+            continue;
+        }
+
+        if arg == "-n" || arg == "--lines" {
+            if i + 1 < args.len() {
+                count = args[i + 1].parse().unwrap_or(count);
+                i += 2;
+                continue;
+            }
+        }
+
+        if let Some(rest) = arg.strip_prefix("-n") {
+            if !rest.is_empty() {
+                count = rest.parse().unwrap_or(count);
+                i += 1;
+                continue;
+            }
+        }
+
+        if let Some(rest) = arg.strip_prefix("--lines=") {
+            if !rest.is_empty() {
+                count = rest.parse().unwrap_or(count);
+                i += 1;
+                continue;
+            }
+        }
+
+        if arg.chars().all(|c| c.is_ascii_digit()) {
+            count = arg.parse().unwrap_or(count);
+            i += 1;
+            continue;
+        }
+
+        files.push(arg);
+        i += 1;
+    }
+
+    TailArgs {
+        count,
+        follow,
+        files,
+    }
+}
+
 /// head - show first N lines
 fn builtin_head_impl(
     shell: &Shell,
@@ -656,9 +740,22 @@ fn builtin_tail_impl(
     out: &mut dyn Write,
 ) -> Result<i32> {
     use std::collections::VecDeque;
+    use std::io::{Seek, SeekFrom};
+    use std::thread;
+    use std::time::Duration;
 
-    let (count, files) = parse_head_tail_args(args);
+    let TailArgs {
+        count,
+        follow,
+        files,
+    } = parse_tail_args(args);
     if files.is_empty() {
+        if follow {
+            anyhow::bail!("tail: -f requires a file");
+        }
+        if count == 0 {
+            return Ok(0);
+        }
         let mut ring: VecDeque<String> = VecDeque::with_capacity(count.max(1));
         for line in stdin.lines() {
             let line = line?;
@@ -670,6 +767,70 @@ fn builtin_tail_impl(
         for line in ring {
             writeln!(out, "{}", line)?;
         }
+        return Ok(0);
+    }
+
+    if follow {
+        if files.len() != 1 {
+            anyhow::bail!("tail: -f currently supports a single file");
+        }
+
+        let expanded = path::expand_env(files[0]);
+        let target = path::resolve_fs(&shell.cwd, &expanded);
+        let f = File::open(&target)
+            .with_context(|| format!("tail: cannot open '{}'", target.display()))?;
+        let mut reader = BufReader::new(f);
+
+        if count > 0 {
+            let mut ring: VecDeque<String> = VecDeque::with_capacity(count.max(1));
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                let read = reader.read_line(&mut buf)?;
+                if read == 0 {
+                    break;
+                }
+                if ring.len() == count {
+                    ring.pop_front();
+                }
+                ring.push_back(buf.trim_end_matches(&['\r', '\n'][..]).to_string());
+            }
+            for line in ring {
+                writeln!(out, "{}", line)?;
+            }
+        } else {
+            reader.seek(SeekFrom::End(0))?;
+        }
+        let _ = out.flush();
+
+        let mut pos = reader.stream_position()?;
+        let mut buf = String::new();
+        loop {
+            if crate::interrupt::seen() {
+                return Ok(130);
+            }
+
+            buf.clear();
+            let read = reader.read_line(&mut buf)?;
+            if read == 0 {
+                if let Ok(meta) = reader.get_ref().metadata() {
+                    let len = meta.len();
+                    if len < pos {
+                        reader.seek(SeekFrom::Start(0))?;
+                        pos = 0;
+                    }
+                }
+                thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+
+            pos = reader.stream_position()?;
+            writeln!(out, "{}", buf.trim_end_matches(&['\r', '\n'][..]))?;
+            let _ = out.flush();
+        }
+    }
+
+    if count == 0 {
         return Ok(0);
     }
     for file in files {
@@ -936,10 +1097,10 @@ fn builtin_help_impl(out: &mut dyn Write) -> Result<i32> {
     writeln!(out, "  {}       Move/rename file", "mv".green())?;
     writeln!(out, "  {}    Create file or update timestamp", "touch".green())?;
     writeln!(out, "  {}  Show command history", "history".green())?;
-    writeln!(out, "  {}        Show first lines of file", "head".green())?;
-    writeln!(out, "  {}         Show last lines of file", "tail".green())?;
-    writeln!(out, "  {}          Print current user", "whoami".green())?;
-    writeln!(out, "  {}       Print machine name", "hostname".green())?;
+    writeln!(out, "  {}        Show first lines of file", "head".green())?;     
+    writeln!(out, "  {}         Show last lines of file (-n, -f)", "tail".green())?;
+    writeln!(out, "  {}          Print current user", "whoami".green())?;       
+    writeln!(out, "  {}       Print machine name", "hostname".green())?;        
     writeln!(out, "  {}     Compute MD5 hashes", "md5sum".green())?;
     writeln!(out, "  {}     Compute SHA-1 hashes", "sha1sum".green())?;
     writeln!(out, "  {}     Compute SHA-256 hashes", "sha256sum".green())?;

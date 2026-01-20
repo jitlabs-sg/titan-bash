@@ -8,6 +8,7 @@
 
 pub mod shell;
 pub mod task;
+pub mod interrupt;
 // pub mod tui;  // TODO: Phase 3
 // pub mod compat;  // TODO: Phase 2
 

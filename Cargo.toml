@@ -5,16 +5,13 @@ edition = "2021"
 authors = ["TITAN Team"]
 description = "Modern shell for Windows - no more Git Bash pain"
 license = "MIT"
-repository = "https://github.com/anthropics/titan-bash"
+repository = "https://github.com/jitlabs-sg/titan-bash"
 keywords = ["shell", "bash", "windows", "terminal"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
 
-# Terminal UI
-ratatui = "0.29"
+# Terminal
 crossterm = "0.28"
 
 # REPL
@@ -34,7 +31,6 @@ md5 = "0.7"
 
 # Error handling
 anyhow = "1"
-thiserror = "2"
 
 # Windows console API
 [target.'cfg(windows)'.dependencies]

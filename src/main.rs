@@ -14,6 +14,7 @@ use colored::Colorize;
 
 use titan_bash::Shell;
 use titan_bash::shell::input::{CrosstermInput, InputResult, normalize_pasted_lines, strip_prompt_prefix};
+use titan_bash::shell::parser;
 use titan_bash::shell::path as shell_path;
 use titan_bash::shell::busybox;
 
@@ -31,6 +32,7 @@ mod ctrlc {
         match ctrl_type {
             CTRL_C_EVENT | CTRL_BREAK_EVENT => {
                 CTRL_SEEN.store(true, Ordering::SeqCst);
+                titan_bash::interrupt::mark_seen();
                 1
             }
             CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
@@ -49,7 +51,11 @@ mod ctrlc {
     }
 
     pub fn take() -> bool {
-        CTRL_SEEN.swap(false, Ordering::SeqCst)
+        let seen = CTRL_SEEN.swap(false, Ordering::SeqCst);
+        if seen {
+            let _ = titan_bash::interrupt::take();
+        }
+        seen
     }
 }
 
@@ -66,17 +72,56 @@ fn load_titanbashrc(shell: &mut Shell) {
         return;
     };
 
-    for (idx, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    let mut buffer = String::new();
+    let mut start_line = 0usize;
+
+    for (idx, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if buffer.is_empty() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            buffer = line.to_string();
+            start_line = idx + 1;
+        } else {
+            if parser::ends_with_line_continuation_backslash(&buffer) {
+                let trimmed_len = buffer.trim_end().len();
+                if trimmed_len > 0 {
+                    buffer.truncate(trimmed_len - 1);
+                }
+                buffer.push_str(line);
+            } else {
+                buffer.push('\n');
+                buffer.push_str(line);
+            }
+        }
+
+        if parser::is_incomplete(&buffer) {
             continue;
         }
-        if let Err(e) = shell.execute(line) {
-            eprintln!("titanbash: {}:{}: {}", path.display(), idx + 1, e);
+
+        let cmd = buffer.trim();
+        if cmd.is_empty() {
+            buffer.clear();
+            continue;
         }
+
+        if let Err(e) = shell.execute(cmd) {
+            eprintln!("titanbash: {}:{}: {}", path.display(), start_line, e);
+        }
+        buffer.clear();
         if shell.should_exit {
             break;
         }
+    }
+
+    if !buffer.trim().is_empty() {
+        eprintln!(
+            "titanbash: {}:{}: {}",
+            path.display(),
+            start_line,
+            "incomplete command at end of file"
+        );
     }
 }
 
@@ -176,7 +221,7 @@ fn execute_command(cmd: &str) -> Result<i32> {
     }
 }
 
-fn execute_script(path: &str, script_args: &[String]) -> Result<i32> {
+fn execute_script(path: &str, script_args: &[String]) -> Result<i32> {    
     let cwd = env::current_dir()?;
     let resolved = shell_path::resolve_fs(&cwd, path);
     let lower = resolved.to_string_lossy().to_ascii_lowercase();
@@ -209,23 +254,63 @@ fn execute_script(path: &str, script_args: &[String]) -> Result<i32> {
         return Ok(status.code().unwrap_or(-1));
     }
 
-    // Treat everything else as a titanbash script file (line-based).
+    // Treat everything else as a titanbash script file (line-based).     
     let content = fs::read_to_string(&resolved)?;
     let mut shell = Shell::new()?;
     load_titanbashrc(&mut shell);
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    let mut buffer = String::new();
+    let mut start_line = 0usize;
+
+    for (idx, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if buffer.is_empty() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            buffer = line.to_string();
+            start_line = idx + 1;
+        } else {
+            if parser::ends_with_line_continuation_backslash(&buffer) {
+                let trimmed_len = buffer.trim_end().len();
+                if trimmed_len > 0 {
+                    buffer.truncate(trimmed_len - 1);
+                }
+                buffer.push_str(line);
+            } else {
+                buffer.push('\n');
+                buffer.push_str(line);
+            }
+        }
+
+        if parser::is_incomplete(&buffer) {
             continue;
         }
-        if let Err(e) = shell.execute(line) {
-            shell.last_status = 1;
-            eprintln!("titanbash: {}: {}", line, e);
+
+        let cmd = buffer.trim();
+        if cmd.is_empty() {
+            buffer.clear();
+            continue;
         }
+
+        if let Err(e) = shell.execute(cmd) {
+            shell.last_status = 1;
+            eprintln!("titanbash: {}:{}: {}", resolved.display(), start_line, e);
+        }
+        buffer.clear();
         if shell.should_exit {
             break;
         }
+    }
+
+    if !buffer.trim().is_empty() {
+        shell.last_status = 1;
+        eprintln!(
+            "titanbash: {}:{}: {}",
+            resolved.display(),
+            start_line,
+            "incomplete command at end of file"
+        );
     }
 
     Ok(shell.last_status)
@@ -275,26 +360,6 @@ fn print_banner() {
         "Tab".yellow()
     );
     println!();
-}
-
-/// Check if input is incomplete and needs continuation
-fn is_incomplete(input: &str) -> bool {
-    let trimmed = input.trim_end();
-    if trimmed.ends_with('\\') {
-        return true;
-    }
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut prev_char = '\0';
-    for c in input.chars() {
-        match c {
-            '\'' if !in_double && prev_char != '\\' => in_single = !in_single,
-            '"' if !in_single && prev_char != '\\' => in_double = !in_double,
-            _ => {}
-        }
-        prev_char = c;
-    }
-    in_single || in_double
 }
 
 fn escape_history_line(s: &str) -> String {
@@ -365,6 +430,14 @@ fn run_repl() -> Result<i32> {
             .map(|l| unescape_history_line(&l))
             .collect();
         const MAX_HISTORY: usize = 5000;
+        // Dedup history: keep last occurrence of each command
+        let mut seen = std::collections::HashSet::new();
+        entries = entries
+            .into_iter()
+            .rev()
+            .filter(|e| seen.insert(e.clone()))
+            .collect();
+        entries.reverse();
         if entries.len() > MAX_HISTORY {
             entries = entries.split_off(entries.len() - MAX_HISTORY);
         }
@@ -408,15 +481,20 @@ fn run_repl() -> Result<i32> {
                 if input_buffer.is_empty() {
                     input_buffer = line;
                 } else {
-                    if input_buffer.trim_end().ends_with('\\') {
-                        input_buffer.truncate(input_buffer.trim_end().len() - 1);
+                    if parser::ends_with_line_continuation_backslash(&input_buffer) {
+                        let trimmed_len = input_buffer.trim_end().len();
+                        if trimmed_len > 0 {
+                            input_buffer.truncate(trimmed_len - 1);
+                        }
+                        input_buffer.push_str(&line);
+                    } else {
+                        input_buffer.push('\n');
+                        input_buffer.push_str(&line);
                     }
-                    input_buffer.push('\n');
-                    input_buffer.push_str(&line);
                 }
 
                 // Check if input is complete
-                if is_incomplete(&input_buffer) {
+                if parser::is_incomplete(&input_buffer) {
                     continue;
                 }
 
@@ -453,9 +531,36 @@ fn run_repl() -> Result<i32> {
                 }
             }
             Ok(InputResult::Paste(lines)) => {
-                // Execute each pasted command (with transcript-friendly prompt stripping)
-                for cmd in normalize_pasted_lines(lines) {
-                    let cmd = cmd.trim();
+                // Execute pasted commands (with transcript-friendly prompt stripping),
+                // respecting multi-line continuations.
+                let mut paste_buffer = String::new();
+                for line in normalize_pasted_lines(lines) {
+                    let line = line.trim();
+                    if paste_buffer.is_empty() {
+                        paste_buffer = line.to_string();
+                    } else {
+                        if parser::ends_with_line_continuation_backslash(&paste_buffer) {
+                            let trimmed_len = paste_buffer.trim_end().len();
+                            if trimmed_len > 0 {
+                                paste_buffer.truncate(trimmed_len - 1);
+                            }
+                            paste_buffer.push_str(line);
+                        } else {
+                            paste_buffer.push('\n');
+                            paste_buffer.push_str(line);
+                        }
+                    }
+
+                    if parser::is_incomplete(&paste_buffer) {
+                        continue;
+                    }
+
+                    let cmd = paste_buffer.trim();
+                    if cmd.is_empty() {
+                        paste_buffer.clear();
+                        continue;
+                    }
+
                     input.add_history(cmd.to_string());
                     if last_written.as_deref() != Some(cmd) {
                         if let Some(w) = history_writer.as_mut() {
@@ -474,9 +579,14 @@ fn run_repl() -> Result<i32> {
                             println!("^C");
                         }
                     }
+
+                    paste_buffer.clear();
                     if shell.should_exit {
                         break;
                     }
+                }
+                if !paste_buffer.trim().is_empty() {
+                    eprintln!("{}: {}", "error".red(), "incomplete command in paste");
                 }
                 if shell.should_exit {
                     break;

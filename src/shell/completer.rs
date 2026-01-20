@@ -232,7 +232,7 @@ impl Completer for TitanHelper {
 
         if tokens.is_empty() {
             // Empty line - show all commands
-            let list_guard = self.path_cmds.read().unwrap();
+            let list_guard = self.path_cmds.read().unwrap_or_else(|p| p.into_inner());
             let candidates: Vec<Pair> = list_guard
                 .iter()
                 .map(|cmd| Pair {
@@ -254,7 +254,7 @@ impl Completer for TitanHelper {
 
         if is_first_word {
             // Complete command name
-            let list_guard = self.path_cmds.read().unwrap();
+            let list_guard = self.path_cmds.read().unwrap_or_else(|p| p.into_inner());
             let candidates: Vec<Pair> = list_guard
                 .iter()
                 .filter(|cmd| cmd.starts_with(&current_raw.to_lowercase()))

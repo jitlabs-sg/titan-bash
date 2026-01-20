@@ -118,7 +118,7 @@ pub fn execute_background(
         };
 
         let child_pid = child.id();
-        *pid.lock().unwrap() = Some(child_pid);
+        *pid.lock().unwrap_or_else(|p| p.into_inner()) = Some(child_pid);
         register_pid(child_pid);
 
         let status = child.wait()?;
@@ -444,6 +444,7 @@ fn execute_pipeline_with_io(shell: &mut Shell, stages: &[AstCommand], io: IoStre
                     vars: HashMap::new(),
                     last_status: 0,
                     should_exit: false,
+                    exit_warned: false,
                 };
                 run_builtin_stage(&mut temp_shell, &name, &args, stage_io)
             });
@@ -808,6 +809,7 @@ fn expand_alias_words(aliases: &HashMap<String, String>, argv: &[Word]) -> Vec<W
             break;
         };
         if !seen.insert(first_text.clone()) {
+            eprintln!("titanbash: alias loop detected at '{}'", first_text);
             break;
         }
 

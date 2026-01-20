@@ -193,6 +193,93 @@ pub fn parse(input: &str) -> Result<Command> {
     Ok(cmd)
 }
 
+fn scan_quote_mode(input: &str) -> QuoteMode {
+    let chars: Vec<char> = input.chars().collect();
+    let mut mode = QuoteMode::None;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '\'' if mode != QuoteMode::Double => {
+                mode = if mode == QuoteMode::Single {
+                    QuoteMode::None
+                } else {
+                    QuoteMode::Single
+                };
+            }
+            '"' if mode != QuoteMode::Single => {
+                mode = if mode == QuoteMode::Double {
+                    QuoteMode::None
+                } else {
+                    QuoteMode::Double
+                };
+            }
+            '\\' if mode == QuoteMode::Double && i + 1 < chars.len() && chars[i + 1] == '"' => {
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    mode
+}
+
+/// Check if a line ends with a bash-style `\` continuation.
+///
+/// TITAN Bash is Windows-first, so a trailing backslash in a path (e.g. `C:\`) is
+/// treated as literal, not a continuation.
+pub fn ends_with_line_continuation_backslash(input: &str) -> bool {
+    let trimmed = input.trim_end();
+    if !trimmed.ends_with('\\') {
+        return false;
+    }
+
+    let mode = scan_quote_mode(trimmed);
+    match mode {
+        QuoteMode::Double => true,
+        QuoteMode::Single => false,
+        QuoteMode::None => {
+            if trimmed.len() == 1 {
+                return true;
+            }
+            let before = &trimmed[..trimmed.len() - 1];
+            before.chars().last().is_some_and(|c| c.is_whitespace())
+        }
+    }
+}
+
+/// Check if input is incomplete and needs continuation.
+///
+/// Intended for interactive input and paste/script normalization.
+pub fn is_incomplete(input: &str) -> bool {
+    let mode = scan_quote_mode(input);
+    if mode != QuoteMode::None {
+        return true;
+    }
+
+    if ends_with_line_continuation_backslash(input) {
+        return true;
+    }
+
+    let trimmed = input.trim_end();
+    if trimmed.ends_with("||")
+        || trimmed.ends_with("&&")
+        || trimmed.ends_with("|&")
+        || trimmed.ends_with('|')
+    {
+        return true;
+    }
+    if trimmed.ends_with("2>>")
+        || trimmed.ends_with("2>")
+        || trimmed.ends_with(">>")
+        || trimmed.ends_with('>')
+        || trimmed.ends_with('<')
+    {
+        return true;
+    }
+    false
+}
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -536,5 +623,38 @@ mod tests {
                 Command::Simple(vec!["echo".into(), "b".into()])
             ])
         );
+    }
+
+    #[test]
+    fn test_is_incomplete_does_not_trigger_on_windows_paths() {
+        assert!(!is_incomplete(r"cd C:\"));
+        assert!(!ends_with_line_continuation_backslash(r"cd C:\"));
+        assert!(!is_incomplete(r"echo \\server\share\"));
+    }
+
+    #[test]
+    fn test_is_incomplete_backslash_continuation() {
+        assert!(is_incomplete("echo foo \\"));
+        assert!(ends_with_line_continuation_backslash("echo foo \\"));
+    }
+
+    #[test]
+    fn test_is_incomplete_backslash_continuation_in_double_quotes() {
+        assert!(is_incomplete("echo \"foo\\"));
+        assert!(ends_with_line_continuation_backslash("echo \"foo\\"));
+    }
+
+    #[test]
+    fn test_is_incomplete_trailing_operators() {
+        assert!(is_incomplete("echo hi |"));
+        assert!(is_incomplete("echo hi &&"));
+        assert!(is_incomplete("echo hi ||"));
+        assert!(is_incomplete("echo hi >"));
+        assert!(is_incomplete("echo hi 2>"));
+    }
+
+    #[test]
+    fn test_is_incomplete_respects_escaped_quote_in_double_quotes() {
+        assert!(!is_incomplete("echo \"a\\\"b\""));
     }
 }
