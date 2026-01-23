@@ -94,6 +94,19 @@ impl LineBuffer {
     fn move_home(&mut self) { self.cursor = 0; }
     fn move_end(&mut self) { self.cursor = self.text.chars().count(); }
     
+    fn skip_left_word(&mut self) {
+        let chars: Vec<char> = self.text.chars().collect();
+        while self.cursor > 0 && chars[self.cursor - 1].is_whitespace() { self.cursor -= 1; }
+        while self.cursor > 0 && !chars[self.cursor - 1].is_whitespace() { self.cursor -= 1; }
+    }
+
+    fn skip_right_word(&mut self) {
+        let chars: Vec<char> = self.text.chars().collect();
+        while self.cursor < self.text.chars().count() - 1 && chars[self.cursor + 1].is_whitespace() { self.cursor += 1; }
+        while self.cursor < self.text.chars().count() - 1 && !chars[self.cursor + 1].is_whitespace() { self.cursor += 1; }
+        if self.cursor < self.text.chars().count() { self.cursor += 1; }
+    }
+
     fn kill_line(&mut self) {
         let byte_pos = self.text.char_indices()
             .nth(self.cursor).map(|(i, _)| i).unwrap_or(self.text.len());
@@ -434,7 +447,7 @@ impl CrosstermInput {
                             self.buffer.kill_line();
                             self.redraw_line(stdout)?;
                         }
-                        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('w') | KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if self.buffer.delete_word() { self.redraw_line(stdout)?; }
                         }
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -443,6 +456,14 @@ impl CrosstermInput {
                         }
                         KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.buffer.move_end();
+                            self.update_cursor(stdout)?;
+                        }
+                        KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.buffer.skip_left_word();
+                            self.update_cursor(stdout)?;
+                        }
+                        KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.buffer.skip_right_word();
                             self.update_cursor(stdout)?;
                         }
                         KeyCode::Enter => {
