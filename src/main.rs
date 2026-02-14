@@ -126,22 +126,41 @@ fn load_titanbashrc(shell: &mut Shell) {
 }
 
 /// Ensure we have a console window (for double-click launch)
+/// Returns true if we allocated a new console (double-click scenario)
 #[cfg(windows)]
-fn ensure_console() {
+fn ensure_console() -> bool {
     use windows_sys::Win32::System::Console::{AllocConsole, GetConsoleWindow};
     unsafe {
         if GetConsoleWindow().is_null() {
             AllocConsole();
+            true
+        } else {
+            false
         }
     }
 }
 
 #[cfg(not(windows))]
-fn ensure_console() {}
+fn ensure_console() -> bool {
+    false
+}
+
+/// Wait for user to press Enter before closing (for double-click scenario)
+#[cfg(windows)]
+fn wait_for_exit() {
+    use std::io::{self, Write};
+    print!("\nPress Enter to exit...");
+    let _ = io::stdout().flush();
+    let mut input = String::new();
+    let _ = io::stdin().read_line(&mut input);
+}
+
+#[cfg(not(windows))]
+fn wait_for_exit() {}
 
 fn main() -> Result<()> {
     // Ensure we have a console (allows double-click to work)
-    ensure_console();
+    let is_double_click = ensure_console();
     #[cfg(windows)]
     ctrlc::install();
     titan_bash::task::init_kill_on_close_job_best_effort();
@@ -186,7 +205,7 @@ fn main() -> Result<()> {
     }
 
     // Interactive mode
-    let code = run_repl()?;
+    let code = run_repl(is_double_click)?;
     std::process::exit(code);
 }
 
@@ -397,7 +416,7 @@ fn unescape_history_line(s: &str) -> String {
     out
 }
 
-fn run_repl() -> Result<i32> {
+fn run_repl(is_double_click: bool) -> Result<i32> {
     print_banner();
 
     let mut shell = Shell::new()?;
@@ -611,5 +630,11 @@ fn run_repl() -> Result<i32> {
     }
 
     println!("Goodbye!");
+
+    // If launched by double-click, wait for user to press Enter before closing
+    if is_double_click {
+        wait_for_exit();
+    }
+
     Ok(shell.last_status)
 }
