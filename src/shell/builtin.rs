@@ -25,12 +25,12 @@ use crate::task::{TaskId, TaskStatus};
 
 /// Builtins that affect shell state (must run in main process)
 const STATE_BUILTINS: &[&str] = &[
-    "cd", "export", "set", "alias", "unalias", "activate", "deactivate", "exit", "quit", "fg", "wait", "kill",
+    "cd", "z", "export", "set", "alias", "unalias", "activate", "deactivate", "exit", "quit", "fg", "wait", "kill",
 ];
 
 /// All builtin command names
 const ALL_BUILTINS: &[&str] = &[
-    "cd", "pwd", "ls", "dir", "cat", "type", "echo",
+    "cd", "z", "pwd", "ls", "dir", "cat", "type", "echo",
     "clear", "cls", "exit", "quit", "help", "jobs",
     "export", "set", "env", "printenv",
     "alias", "unalias", "which", "where", "mkdir", "rm",
@@ -131,6 +131,10 @@ pub fn try_builtin(shell: &mut Shell, cmd: &str) -> Result<Option<i32>> {
     match command.as_str() {
         "cd" => {
             let code = builtin_cd(shell, &rest)?;
+            Ok(Some(code))
+        }
+        "z" => {
+            let code = builtin_z(shell, &rest)?;
             Ok(Some(code))
         }
         "pwd" => {
@@ -289,6 +293,7 @@ pub fn run_builtin_io(
 
     match lower.as_str() {
         "cd" => builtin_cd(shell, &args_ref),
+        "z" => builtin_z(shell, &args_ref),
         "pwd" => builtin_pwd_impl(shell, stdout),
         "ls" | "dir" => builtin_ls_impl(shell, &args_ref, stdout, stderr),
         "cat" | "type" => builtin_cat_impl(shell, &args_ref, stdin, stdout, stderr),
@@ -363,6 +368,65 @@ fn builtin_cd(shell: &mut Shell, args: &[&str]) -> Result<i32> {
     shell.cwd = target;
 
     Ok(0)
+}
+
+/// z - zoxide smart directory jump
+fn builtin_z(shell: &mut Shell, args: &[&str]) -> Result<i32> {
+    use std::process::Command;
+
+    if args.is_empty() {
+        // z with no args: go to home (like cd)
+        let home = dirs::home_dir().unwrap_or_else(|| shell.cwd.clone());
+        env::set_current_dir(&home)?;
+        shell.cwd = home;
+        return Ok(0);
+    }
+
+    // Query zoxide for the best match
+    let output = Command::new("zoxide")
+        .arg("query")
+        .arg("--")
+        .args(args)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if path_str.is_empty() {
+                eprintln!("z: no match found");
+                return Ok(1);
+            }
+            let target = std::path::PathBuf::from(&path_str);
+            if !target.is_dir() {
+                anyhow::bail!("z: {}: No such directory", target.display());
+            }
+            env::set_current_dir(&target)?;
+            shell.cwd = target.clone();
+            // Print the directory we jumped to
+            println!("{}", target.display());
+
+            // Also add to zoxide database
+            let _ = Command::new("zoxide").arg("add").arg(&path_str).spawn();
+            Ok(0)
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            if err.contains("no match found") {
+                eprintln!("z: no match found for {:?}", args.join(" "));
+            } else {
+                eprintln!("z: {}", err.trim());
+            }
+            Ok(1)
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                eprintln!("z: zoxide not found. Install with: scoop install zoxide");
+            } else {
+                eprintln!("z: failed to run zoxide: {}", e);
+            }
+            Ok(1)
+        }
+    }
 }
 
 /// pwd - print working directory
